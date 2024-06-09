@@ -69,7 +69,7 @@ namespace :migrations do
 
     user = User.unscoped
     user = user.where(provider: args[:provider]) if args[:provider].present?
-    user = user.select(:id, :uid, :name, :email, :social_uid, :language, :role_id, :created_at)
+    user = user.select(:id, :uid, :name, :email,:password_digest, :social_uid, :language, :role_id, :created_at)
                .includes(:role)
                .where.not(roles: { name: COMMON[:filtered_user_roles] }, deleted: true)
 
@@ -79,6 +79,7 @@ namespace :migrations do
                    { name: u.name,
                      email: u.email,
                      external_id: u.social_uid,
+                     password_digest: u.password_digest,
                      provider: u.provider,
                      language: u.language,
                      role: role_name,
@@ -141,9 +142,12 @@ namespace :migrations do
                           muteOnStart: parsed_room_settings["muteOnStart"] == true ? "true" : "false",
                           glAnyoneCanStart: parsed_room_settings["anyoneCanStart"] == true ? "true" : "false",
                           glAnyoneJoinAsModerator: parsed_room_settings["joinModerator"] == true ? "true" : "false",
-                          guestPolicy: parsed_room_settings["requireModeratorApproval"] == true ? "ASK_MODERATOR" : "ALWAYS_ACCEPT"
+                          guestPolicy: parsed_room_settings["requireModeratorApproval"] == true ? "ASK_MODERATOR" : "ALWAYS_ACCEPT",
                         }
                       end
+
+      room_settings[:glViewerAccessCode] = r.access_code if r.access_code.present?
+      room_settings[:glModeratorAccessCode] = r.moderator_access_code if r.moderator_access_code.present?
 
       shared_users_emails = r.shared_access.joins(:user).pluck(:'users.email')
 
@@ -155,7 +159,14 @@ namespace :migrations do
                          provider: r.owner.provider,
                          room_settings: room_settings,
                          shared_users_emails: shared_users_emails } }
-
+      if r.presentation.attached?
+         begin
+             params[:room][:presentation] = { blob: Base64.encode64(r.presentation.blob.download),
+                                               filename: r.presentation.blob.filename.to_s }
+         rescue Errno::ENOENT
+             p "Failed to locate '#{r.presentation.blob.filename.to_s}' in active storage, skipping."
+         end
+      end
       response = Net::HTTP.post(uri('rooms'), payload(params), COMMON[:headers])
 
       case response
@@ -168,7 +179,7 @@ namespace :migrations do
         puts red "Unable to migrate Room:"
         puts yellow "UID: #{r.uid}"
         puts yellow "Name: #{params[:room][:name]}"
-        puts yellow "Provider: #{params[:room][:provider]}}"
+        puts yellow "Provider: #{params[:room][:provider]}"
         puts red "Errors: #{JSON.parse(response.body.to_s)['errors']}"
         has_encountred_issue = 1 # At least one of the migrations failed.
       end
@@ -204,7 +215,11 @@ namespace :migrations do
 
 
     # Sets Record to default_enabled in V3 if set to optional in V2
-    rooms_config_record_value = infer_room_config_value(setting.get_value('Room Configuration Recording'))
+    rooms_config_record_value = if setting.get_value("Require Recording Consent") != "true"
+      "true"
+    else
+      infer_room_config_value(setting.get_value('Room Configuration Recording'))
+    end
 
     # RoomConfigurations
     rooms_configurations = {
